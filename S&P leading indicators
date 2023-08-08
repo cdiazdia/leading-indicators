@@ -1,0 +1,80 @@
+import pandas_datareader as pdr
+import pandas as pd
+import numpy as np
+from scipy import stats
+import datetime
+from statsmodels.tsa.api import VAR
+from statsmodels.tsa.stattools import adfuller
+
+# 1. Data Acquisition
+start = datetime.datetime(2000, 8, 5)
+end = datetime.datetime(2023, 1, 1)
+
+sp500 = pdr.get_data_fred('SP500', start, end)
+ten_year = pdr.get_data_fred('GS10', start, end)
+two_year = pdr.get_data_fred('GS2', start, end)
+unemployment = pdr.get_data_fred('UNRATE', start, end)
+consumer_sentiment = pdr.get_data_fred('UMCSENT', start, end)
+
+# 2. Data Processing
+# Convert all data to monthly frequency using the month's last value
+sp500_monthly = sp500.resample('M').last()
+ten_year_monthly = ten_year.resample('M').last()
+two_year_monthly = two_year.resample('M').last()
+unemployment_monthly = unemployment.resample('M').last()
+consumer_sentiment_monthly = consumer_sentiment.resample('M').last()
+
+# Calculate the spread using resampled data
+spread = ten_year_monthly['GS10'] - two_year_monthly['GS2']
+
+# Join the resampled data
+data = pd.concat([sp500_monthly, spread, unemployment_monthly, consumer_sentiment_monthly], axis=1)
+data.columns = ['SP500', '10-2 Spread', 'Unemployment', 'Consumer Sentiment']
+data.dropna(inplace=True)
+
+# 3. Check for Stationarity
+def check_stationarity(series):
+    allowed_maxlag = len(series) // 2 - 2
+    result = adfuller(series, maxlag=allowed_maxlag)
+    return result[1] <= 0.05
+
+for col in data.columns:
+    if not check_stationarity(data[col]):
+        data[col] = data[col].diff()
+
+data.dropna(inplace=True)
+
+# 4. Model Fitting
+max_lags = min(15, len(data) // 10)
+model = VAR(data)
+results = model.fit(maxlags=max_lags, ic='aic')
+
+coefficients = results.params
+stderrs = results.stderr
+tvalues = results.tvalues
+p_values = pd.DataFrame(2 * (1 - stats.norm.cdf(abs(tvalues))), columns=tvalues.columns, index=tvalues.index)
+
+# Formatting the summary DataFrame
+formatted_results = []
+
+for col in coefficients.columns:
+    current_data = pd.concat([
+        coefficients[col],
+        stderrs[col],
+        tvalues[col],
+        p_values[col]
+    ], axis=1)
+    current_data.columns = ['Coefficients', 'Std. Errors', 'T-values', 'P-values']
+    current_data['Variable'] = col
+    formatted_results.append(current_data)
+
+formatted_summary_df = pd.concat(formatted_results)
+formatted_summary_df = formatted_summary_df[['Variable', 'Coefficients', 'Std. Errors', 'T-values', 'P-values']]
+formatted_summary_df.set_index(['Variable', formatted_summary_df.index], inplace=True)
+
+print(formatted_summary_df)
+
+# 5. Causality Testing
+causality = results.test_causality('SP500', ['10-2 Spread', 'Unemployment', 'Consumer Sentiment'], kind='f')
+print(causality)
+
